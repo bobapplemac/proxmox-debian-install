@@ -1,14 +1,18 @@
 #!/bin/bash
 
+# Quick start:
+# curl -fsSLO https://raw.githubusercontent.com/bobapplemac/proxmox-debian-install/main/setup-ifupdown.sh && bash setup-ifupdown.sh
+
 # SPDX-License-Identifier: 0BSD
 # Copyright (c) 2026 Andrew J. Moore
 #
 # ------------------------------------------------------------------------------------------
 # File:        setup-ifupdown.sh
-# Revision:    r10
+# Revision:    r11
 # Modified:    2026-08-21
 # Author:      Andrew J. Moore
 # License:     Zero-Clause BSD (0BSD)
+# Source:      https://github.com/bobapplemac/proxmox-debian-install/blob/main/setup-ifupdown.sh
 # Description: Converts a simple Debian 13 Netplan/systemd-networkd configuration to ifupdown.
 #              The script is intentionally limited to one configured Ethernet interface with
 #              either DHCPv4 or one static IPv4 address. Simple cloud-image MAC match/set-name
