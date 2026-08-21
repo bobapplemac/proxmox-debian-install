@@ -12,7 +12,7 @@
 # Modified:    2026-08-21
 # Author:      Andrew J. Moore
 # License:     Zero-Clause BSD (0BSD)
-# Source: https://github.com/bobapplemac/proxmox-debian-install/blob/main/install-pbs.sh
+# Source:      https://github.com/bobapplemac/proxmox-debian-install/blob/main/install-pbs.sh
 # Description: Installs Proxmox Backup Server 4 on a supported Debian 13 (Trixie) system.
 #              The script validates that the host already has a persistent static IPv4
 #              configuration in /etc/network/interfaces and that /etc/hosts maps both the
