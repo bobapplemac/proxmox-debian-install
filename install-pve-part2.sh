@@ -1,14 +1,18 @@
 #!/bin/bash
 
+# Quick start:
+# curl -fsSLO https://raw.githubusercontent.com/bobapplemac/proxmox-debian-install/main/install-pve-part2.sh && bash install-pve-part2.sh
+
 # SPDX-License-Identifier: 0BSD
 # Copyright (c) 2026 Andrew J. Moore
 #
 # ------------------------------------------------------------------------------------------
 # File:        install-pve-part2.sh
-# Revision:    r4
+# Revision:    r5
 # Modified:    2026-08-21
 # Author:      Andrew J. Moore
 # License:     Zero-Clause BSD (0BSD)
+# Source:      https://github.com/bobapplemac/proxmox-debian-install/blob/main/install-pve-part2.sh
 # Description: Performs the second stage of installing Proxmox VE 9 on a supported Debian 13
 #              (Trixie) system after rebooting into the Proxmox kernel. Installs the Proxmox VE
 #              package set, configures Postfix for local-only delivery, maintains the removable
