@@ -1,14 +1,18 @@
 #!/bin/bash
 
+# Quick start:
+# curl -fsSLO https://raw.githubusercontent.com/bobapplemac/proxmox-debian-install/main/setup-swapfile.sh && bash setup-swapfile.sh
+
 # SPDX-License-Identifier: 0BSD
 # Copyright (c) 2026 Andrew J. Moore
 #
 # ------------------------------------------------------------------------------------------
 # File:        setup-swapfile.sh
-# Revision:    r2
-# Modified:    2026-08-20
+# Revision:    r3
+# Modified:    2026-08-21
 # Author:      Andrew J. Moore
 # License:     Zero-Clause BSD (0BSD)
+# Source:      https://github.com/bobapplemac/proxmox-debian-install/blob/main/setup-swapfile.sh
 # Description: Creates and enables a swap file on a Debian system that does not already have
 #              swap configured. Prompts for the desired swap size, defaults to 8 GiB, adds the
 #              swap file to /etc/fstab, and configures vm.swappiness=10 persistently.
