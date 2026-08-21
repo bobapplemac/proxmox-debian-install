@@ -1,14 +1,18 @@
 #!/bin/bash
 
+# Quick start:
+# curl -fsSLO https://raw.githubusercontent.com/bobapplemac/proxmox-debian-install/main/setup-nics.sh && bash setup-nics.sh
+
 # SPDX-License-Identifier: 0BSD
 # Copyright (c) 2026 Andrew J. Moore
 #
 # ------------------------------------------------------------------------------------------
 # File:        setup-nics.sh
-# Revision:    r2
-# Modified:    2026-08-20
+# Revision:    r3
+# Modified:    2026-08-21
 # Author:      Andrew J. Moore
 # License:     Zero-Clause BSD (0BSD)
+# Source:      https://github.com/bobapplemac/proxmox-debian-install/blob/main/setup-nics.sh
 # Description: Configures persistent systemd interface naming for physical Ethernet NICs
 #              using the eth# and eth#p# naming convention. Automatically discovers and
 #              groups physical NIC ports, allows interactive correction of NIC grouping
