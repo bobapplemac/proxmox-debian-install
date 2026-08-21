@@ -24,10 +24,9 @@ My preferred basic layout is generally:
 This makes it possible to build relatively simple systems such as:
 
 ```text
-EFI System Partition
-        |
-        +-- /
-            XFS
+System disk
+├── EFI System Partition  -> /boot/efi
+└── Root partition        -> /        (XFS)
 ```
 
 rather than requiring an LVM-based layout.
