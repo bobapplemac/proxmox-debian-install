@@ -101,6 +101,65 @@ As with PBS, the installer automatically selects the appropriate VM or bare-meta
 
 The `--force-bare-metal` option may be used to exercise the full bare-metal path inside a VM.
 
+## Quick Start
+
+Convenience scripts are provided under `quick-start/` to download an ordered working set of the canonical scripts for a particular installation workflow.
+
+The downloaded copies are given numeric prefixes so they sort in the recommended execution order. The canonical repository filenames remain unchanged.
+
+### Proxmox VE
+
+Fresh Debian 13 / Trixie netinst installation on bare metal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bobapplemac/proxmox-debian-install/main/quick-start/pve.sh | bash
+```
+
+Creates:
+
+```text
+proxmox-pve/
+├── 20-setup-nics.sh
+├── 30-setup-static-ip.sh
+├── 40-disable-ipv6.sh
+├── 50-setup-swapfile.sh
+├── 60-setup-xfs-storage.sh
+├── 90-install-pve-part1.sh
+└── 95-install-pve-part2.sh
+```
+
+### Proxmox Backup Server
+
+Fresh standard Debian installation:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bobapplemac/proxmox-debian-install/main/quick-start/pbs.sh | bash
+```
+
+Fresh Debian cloud image:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bobapplemac/proxmox-debian-install/main/quick-start/pbs-cloud.sh | bash
+```
+
+### Proxmox Datacenter Manager
+
+Fresh standard Debian installation:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bobapplemac/proxmox-debian-install/main/quick-start/pdm.sh | bash
+```
+
+Fresh Debian cloud image:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bobapplemac/proxmox-debian-install/main/quick-start/pdm-cloud.sh | bash
+```
+
+The quick-start scripts only download and rename the canonical scripts. They do not execute provisioning steps automatically.
+
+After downloading, enter the generated directory, review the scripts, and run the applicable files in numeric order. Optional steps and required reboot points are printed by the quick-start script and documented below.
+
 ## Network Interface Naming
 
 These scripts use persistent systemd `.link` files for physical Ethernet interface naming.
