@@ -8,8 +8,8 @@
 #
 # ------------------------------------------------------------------------------------------
 # File:        disable-ipv6.sh
-# Revision:    r3
-# Modified:    2026-08-20
+# Revision:    r4
+# Modified:    2026-08-21
 # Author:      Andrew J. Moore
 # License:     Zero-Clause BSD (0BSD)
 # Source:      https://github.com/bobapplemac/proxmox-debian-install/blob/main/disable-ipv6.sh
