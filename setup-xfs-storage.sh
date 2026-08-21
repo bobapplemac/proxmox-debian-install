@@ -1,14 +1,18 @@
 #!/bin/bash
 
+# Quick start:
+# curl -fsSLO https://raw.githubusercontent.com/bobapplemac/proxmox-debian-install/main/setup-xfs-storage.sh && bash setup-xfs-storage.sh
+
 # SPDX-License-Identifier: 0BSD
 # Copyright (c) 2026 Andrew J. Moore
 #
 # ------------------------------------------------------------------------------------------
 # File:        setup-xfs-storage.sh
-# Revision:    r6
-# Modified:    2026-08-20
+# Revision:    r7
+# Modified:    2026-08-21
 # Author:      Andrew J. Moore
 # License:     Zero-Clause BSD (0BSD)
+# Source:      https://github.com/bobapplemac/proxmox-debian-install/blob/main/setup-xfs-storage.sh
 # Description: Configures auxiliary local XFS storage on otherwise unused block devices.
 #              Enumerates eligible whole-disk devices, displays hardware, physical-path, and existing
 #              layout information, suggests a local-* storage label, and requires explicit destructive
