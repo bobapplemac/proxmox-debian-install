@@ -1,0 +1,949 @@
+#!/bin/bash
+
+# SPDX-License-Identifier: 0BSD
+# Copyright (c) 2026 Andrew J. Moore
+#
+# ------------------------------------------------------------------------------------------
+# File:        setup-nics.sh
+# Revision:    r2
+# Modified:    2026-08-20
+# Author:      Andrew J. Moore
+# License:     Zero-Clause BSD (0BSD)
+# Description: Configures persistent systemd interface naming for physical Ethernet NICs
+#              using the eth# and eth#p# naming convention. Automatically discovers and
+#              groups physical NIC ports, allows interactive correction of NIC grouping
+#              and port ordering, and writes systemd .link files under
+#              /usr/local/lib/systemd/network.
+#
+#              Updates /etc/network/interfaces to reference the new interface names,
+#              stages the proposed configuration as /etc/network/interfaces.new for
+#              review, and creates a timestamped backup before replacing the original.
+#
+# Naming:
+#              Single-port NIC:  eth#
+#              Multi-port NIC:   eth#p#
+#
+#              NIC numbering starts at 0.
+#              Port numbering starts at 1.
+#
+# Requirements:
+#              bash
+#              coreutils
+#              findutils
+#              grep
+#              sed
+#              initramfs-tools
+#
+# Optional:
+#              pciutils
+#                                   Provides lspci hardware descriptions during NIC
+#                                   discovery. Interface discovery does not require it.
+#
+# Output:
+#              /usr/local/lib/systemd/network/40-eth*.link
+#              /etc/network/interfaces
+#              /etc/network/interfaces.bak-YYYYMMDD-HHMMSS
+#
+# Notes:
+#              Interface renaming takes effect after reboot. The script does not restart
+#              networking or otherwise activate the new interface names while running.
+# ------------------------------------------------------------------------------------------
+
+set -euo pipefail
+
+LINK_DIR=/usr/local/lib/systemd/network
+INTERFACES=/etc/network/interfaces
+INTERFACES_NEW=/etc/network/interfaces.new
+INTERFACES_D=/etc/network/interfaces.d
+
+declare -a IFACES FINAL_GROUPS
+declare -A ID IFACE_BY_ID
+declare -A MAC PCI DRIVER DESC PORT STATE
+declare -A AUTO_GROUP TARGET
+
+
+die() {
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+warn() {
+    echo "WARNING: $*" >&2
+}
+
+yesno() {
+    local prompt=$1
+    local default=${2:-N}
+    local answer
+
+    if [[ $default == Y ]]; then
+        read -r -p "$prompt [Y/n] " answer
+        [[ -z $answer || $answer =~ ^[Yy]$ ]]
+    else
+        read -r -p "$prompt [y/N] " answer
+        [[ $answer =~ ^[Yy]$ ]]
+    fi
+}
+
+
+# -----------------------------------------------------------------------------
+# Preflight
+# -----------------------------------------------------------------------------
+
+preflight() {
+    (( EUID == 0 )) || die "Run this script as root."
+    [[ -t 0 ]] || die "This script requires an interactive terminal."
+    [[ -f $INTERFACES ]] || die "$INTERFACES does not exist."
+
+    local cmd
+
+    for cmd in \
+        basename cat chmod cp cut date diff find grep mkdir mv paste \
+        readlink rm sed sort update-initramfs
+    do
+        command -v "$cmd" >/dev/null 2>&1 ||
+            die "Required command '$cmd' was not found."
+    done
+
+    check_interfaces_d
+    check_existing_new_file
+    check_existing_link_files
+}
+
+check_interfaces_d() {
+    [[ -d $INTERFACES_D ]] || return 0
+
+    local -a files=()
+
+    mapfile -t files < <(
+        find "$INTERFACES_D" -maxdepth 1 \
+            \( -type f -o -type l \) \
+            -print |
+        sort
+    )
+
+    (( ${#files[@]} )) || return 0
+
+    echo
+    warn "Files were found under $INTERFACES_D:"
+    printf '  %s\n' "${files[@]}"
+
+    echo
+    echo "Only $INTERFACES will be updated."
+    echo "References to renamed interfaces in these files will NOT be updated."
+    echo
+
+    yesno "Continue anyway?" N || exit 1
+}
+
+check_existing_new_file() {
+    [[ -e $INTERFACES_NEW ]] || return 0
+
+    echo
+    warn "$INTERFACES_NEW already exists."
+
+    yesno "Overwrite it later?" N || exit 1
+}
+
+check_existing_link_files() {
+    local -a files=()
+    local dir
+    local file
+
+    for dir in \
+        /usr/local/lib/systemd/network \
+        /etc/systemd/network
+    do
+        [[ -d $dir ]] || continue
+
+        while IFS= read -r file; do
+            files+=("$file")
+        done < <(
+            find "$dir" -maxdepth 1 \
+                \( -type f -o -type l \) \
+                -name '*.link' \
+                -print |
+            sort
+        )
+    done
+
+    (( ${#files[@]} )) || return 0
+
+    echo
+    warn "Existing systemd .link files were found:"
+    echo
+
+    printf '  %s\n' "${files[@]}"
+
+    echo
+    echo "Existing .link files may affect interface naming or conflict with"
+    echo "the configuration generated by this script."
+    echo
+
+    yesno "Continue anyway?" N || exit 1
+}
+
+
+# -----------------------------------------------------------------------------
+# Hardware discovery
+# -----------------------------------------------------------------------------
+
+pci_address() {
+    local dev
+
+    dev=$(basename "$(readlink -f "/sys/class/net/$1/device")")
+
+    if [[ $dev =~ ^[0-9A-Fa-f]{4}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}\.[0-7]$ ]]; then
+        printf '%s\n' "$dev"
+    fi
+
+    return 0
+}
+
+discover() {
+    local path
+    local iface
+    local pci
+    local group
+    local id=1
+
+    local -a found=()
+
+    for path in /sys/class/net/*; do
+        iface=$(basename "$path")
+
+        [[ $iface == lo ]] && continue
+
+        # Ethernet only.
+        [[ -r $path/type && $(cat "$path/type") == 1 ]] || continue
+
+        # Excludes bridges, bonds, VLANs, veth interfaces, etc.
+        [[ -e $path/device ]] || continue
+
+        # Exclude wireless devices.
+        [[ -d $path/wireless ]] && continue
+
+        # Exclude SR-IOV virtual functions.
+        [[ -e $path/device/physfn ]] && continue
+
+        found+=("$iface")
+    done
+
+    (( ${#found[@]} )) ||
+        die "No physical Ethernet interfaces were found."
+
+    # Make discovery order deterministic.
+    mapfile -t IFACES < <(
+        printf '%s\n' "${found[@]}" |
+        sort
+    )
+
+    for iface in "${IFACES[@]}"; do
+        path=/sys/class/net/$iface
+
+        pci=$(pci_address "$iface")
+
+        # Default grouping heuristic:
+        #
+        #   0000:03:00.0
+        #   0000:03:00.1
+        #
+        # become one group: 0000:03:00
+        group=${pci%.*}
+
+        # Non-PCI devices are conservatively kept separate.
+        [[ -n $group ]] || group="other:$iface"
+
+        ID[$iface]=$id
+        IFACE_BY_ID[$id]=$iface
+
+        MAC[$iface]=$(cat "$path/address")
+        PCI[$iface]=$pci
+        STATE[$iface]=$(cat "$path/operstate" 2>/dev/null || true)
+
+        PORT[$iface]=$(
+            cat "$path/phys_port_name" 2>/dev/null ||
+            cat "$path/dev_port" 2>/dev/null ||
+            true
+        )
+
+        DRIVER[$iface]=""
+        DESC[$iface]=""
+
+        if [[ -L $path/device/driver ]]; then
+            DRIVER[$iface]=$(
+                basename "$(readlink -f "$path/device/driver")"
+            )
+        fi
+
+        # lspci is optional. It is used only to make the interactive
+        # display more useful.
+        if [[ -n $pci ]] && command -v lspci >/dev/null 2>&1; then
+            DESC[$iface]=$(
+                lspci -D -s "$pci" 2>/dev/null |
+                sed -E 's/^[^ ]+ //' ||
+                true
+            )
+        fi
+
+        AUTO_GROUP[$group]="${AUTO_GROUP[$group]:+${AUTO_GROUP[$group]} }$iface"
+
+        ((id += 1))
+    done
+}
+
+
+# -----------------------------------------------------------------------------
+# Display helpers
+# -----------------------------------------------------------------------------
+
+show_iface() {
+    local iface=$1
+
+    printf \
+        '  [%d] %-15s MAC %-17s' \
+        "${ID[$iface]}" \
+        "$iface" \
+        "${MAC[$iface]}"
+
+    if [[ -n ${PCI[$iface]} ]]; then
+        printf '  PCI %s' "${PCI[$iface]}"
+    fi
+
+    if [[ -n ${PORT[$iface]} ]]; then
+        printf '  Port %s' "${PORT[$iface]}"
+    fi
+
+    if [[ -n ${STATE[$iface]} ]]; then
+        printf '  State %s' "${STATE[$iface]}"
+    fi
+
+    printf '\n'
+
+    if [[ -n ${DESC[$iface]} || -n ${DRIVER[$iface]} ]]; then
+        printf '      '
+
+        if [[ -n ${DESC[$iface]} ]]; then
+            printf '%s' "${DESC[$iface]}"
+        fi
+
+        if [[ -n ${DESC[$iface]} && -n ${DRIVER[$iface]} ]]; then
+            printf ' | '
+        fi
+
+        if [[ -n ${DRIVER[$iface]} ]]; then
+            printf 'driver=%s' "${DRIVER[$iface]}"
+        fi
+
+        printf '\n'
+    fi
+}
+
+show_discovery() {
+    echo
+    echo "Discovered Ethernet interfaces:"
+    echo
+
+    local iface
+
+    for iface in "${IFACES[@]}"; do
+        show_iface "$iface"
+    done
+}
+
+
+# -----------------------------------------------------------------------------
+# Automatic grouping
+# -----------------------------------------------------------------------------
+
+sort_members() {
+    local iface
+    local pci
+    local port
+    local function
+
+    for iface in $1; do
+        pci=${PCI[$iface]}
+        port=${PORT[$iface]}
+        function=""
+
+        if [[ $pci =~ \.([0-7])$ ]]; then
+            function=${BASH_REMATCH[1]}
+        fi
+
+        # Prefer explicit kernel port numbers where available.
+        if [[ $port =~ ^[0-9]+$ ]]; then
+
+            printf \
+                '0:%08d:%s\t%s\n' \
+                "$port" "$pci" "$iface"
+
+        elif [[ -n $port ]]; then
+
+            printf \
+                '1:%s:%s\t%s\n' \
+                "$port" "$pci" "$iface"
+
+        elif [[ -n $function ]]; then
+
+            printf \
+                '2:%08d:%s\t%s\n' \
+                "$function" "$pci" "$iface"
+
+        else
+
+            printf \
+                '3:%s\t%s\n' \
+                "$iface" "$iface"
+        fi
+    done |
+        sort |
+        cut -f2 |
+        paste -sd' ' -
+}
+
+build_auto_groups() {
+    local -n groups_ref=$1
+    local key
+
+    groups_ref=()
+
+    while read -r key; do
+        [[ -n $key ]] || continue
+        groups_ref+=("$(sort_members "${AUTO_GROUP[$key]}")")
+    done < <(
+        printf '%s\n' "${!AUTO_GROUP[@]}" |
+        sort
+    )
+}
+
+show_groups() {
+    local -n groups_ref=$1
+
+    local i
+    local iface
+
+    echo
+    echo "Suggested physical NIC grouping:"
+    echo
+
+    for ((i=0; i<${#groups_ref[@]}; i++)); do
+        echo "  Group $((i + 1)):"
+
+        for iface in ${groups_ref[$i]}; do
+            show_iface "$iface"
+        done
+
+        echo
+    done
+}
+
+
+# -----------------------------------------------------------------------------
+# Interactive mapping
+# -----------------------------------------------------------------------------
+
+normalize_ids() {
+    local input=${1//,/ }
+
+    # Interface IDs are numeric and therefore intentionally word-split.
+    printf '%s\n' $input
+}
+
+valid_permutation() {
+    local input=$1
+    local max=$2
+
+    local n
+    local seen=" "
+    local count=0
+
+    while read -r n; do
+        [[ $n =~ ^[0-9]+$ ]] || return 1
+        (( n >= 1 && n <= max )) || return 1
+        [[ $seen != *" $n "* ]] || return 1
+
+        seen+="$n "
+        ((count += 1))
+    done < <(
+        normalize_ids "$input"
+    )
+
+    (( count == max ))
+}
+
+choose_auto_group_order() {
+    local -n groups_ref=$1
+
+    local default=""
+    local input
+    local n
+    local i
+
+    local -a ordered=()
+
+    for ((i=1; i<=${#groups_ref[@]}; i++)); do
+        default+="${default:+ }$i"
+    done
+
+    while true; do
+        read -r -p \
+            "NIC order for eth0, eth1, ... [$default]: " \
+            input
+
+        input=${input:-$default}
+
+        if valid_permutation "$input" "${#groups_ref[@]}"; then
+            break
+        fi
+
+        echo "Enter every group number exactly once."
+    done
+
+    while read -r n; do
+        ordered+=("${groups_ref[$((n - 1))]}")
+    done < <(
+        normalize_ids "$input"
+    )
+
+    groups_ref=("${ordered[@]}")
+}
+
+choose_port_order() {
+    local -n groups_ref=$1
+
+    local i
+    local iface
+    local input
+    local default
+    local n
+    local count
+    local valid
+    local allowed
+    local seen
+
+    local -a members
+    local -a reordered
+
+    for ((i=0; i<${#groups_ref[@]}; i++)); do
+        read -ra members <<< "${groups_ref[$i]}"
+
+        (( ${#members[@]} > 1 )) || continue
+
+        default=""
+
+        echo
+        echo "Port order for eth$i:"
+
+        for iface in "${members[@]}"; do
+            default+="${default:+ }${ID[$iface]}"
+
+            printf \
+                '  [%d] %s\n' \
+                "${ID[$iface]}" \
+                "$iface"
+        done
+
+        while true; do
+            read -r -p \
+                "Interface order for p1, p2, ... [$default]: " \
+                input
+
+            input=${input:-$default}
+
+            allowed=" "
+
+            for iface in "${members[@]}"; do
+                allowed+="${ID[$iface]} "
+            done
+
+            seen=" "
+            count=0
+            valid=1
+
+            while read -r n; do
+                if [[ ! $n =~ ^[0-9]+$ ||
+                      $allowed != *" $n "* ||
+                      $seen == *" $n "* ]]
+                then
+                    valid=0
+                    break
+                fi
+
+                seen+="$n "
+                ((count += 1))
+            done < <(
+                normalize_ids "$input"
+            )
+
+            if (( valid && count == ${#members[@]} )); then
+                break
+            fi
+
+            echo "Enter each listed interface number exactly once."
+        done
+
+        reordered=()
+
+        while read -r n; do
+            reordered+=("${IFACE_BY_ID[$n]}")
+        done < <(
+            normalize_ids "$input"
+        )
+
+        groups_ref[$i]="${reordered[*]}"
+    done
+}
+
+manual_grouping() {
+    local -A remaining=()
+
+    local eth=0
+    local input
+    local n
+    local iface
+    local valid
+    local seen
+    local members
+
+    local -a selected
+
+    for iface in "${IFACES[@]}"; do
+        remaining[${ID[$iface]}]=$iface
+    done
+
+    FINAL_GROUPS=()
+
+    echo
+    echo "Define NICs in target eth# order."
+    echo "For a multi-port NIC, enter its ports in p1, p2, ... order."
+
+    while (( ${#remaining[@]} )); do
+        echo
+        echo "Remaining interfaces:"
+
+        for iface in "${IFACES[@]}"; do
+            if [[ -n ${remaining[${ID[$iface]}]:-} ]]; then
+                show_iface "$iface"
+            fi
+        done
+
+        echo
+
+        while true; do
+            read -r -p "Interfaces for eth$eth: " input
+
+            selected=()
+            seen=" "
+            valid=1
+
+            while read -r n; do
+                if [[ ! $n =~ ^[0-9]+$ ||
+                      -z ${remaining[$n]:-} ||
+                      $seen == *" $n "* ]]
+                then
+                    valid=0
+                    break
+                fi
+
+                seen+="$n "
+                selected+=("$n")
+            done < <(
+                normalize_ids "$input"
+            )
+
+            if (( valid && ${#selected[@]} )); then
+                break
+            fi
+
+            echo "Enter one or more remaining interface numbers."
+        done
+
+        members=""
+
+        for n in "${selected[@]}"; do
+            members+="${members:+ }${remaining[$n]}"
+            unset 'remaining[$n]'
+        done
+
+        FINAL_GROUPS+=("$members")
+
+        ((eth += 1))
+    done
+}
+
+choose_mapping() {
+    local -a groups=()
+
+    build_auto_groups groups
+    show_groups groups
+
+    if yesno "Accept detected grouping?" Y; then
+
+        FINAL_GROUPS=("${groups[@]}")
+
+        echo
+
+        choose_auto_group_order FINAL_GROUPS
+        choose_port_order FINAL_GROUPS
+
+    else
+
+        manual_grouping
+    fi
+
+    local i
+    local p
+    local iface
+
+    local -a members
+
+    for ((i=0; i<${#FINAL_GROUPS[@]}; i++)); do
+        read -ra members <<< "${FINAL_GROUPS[$i]}"
+
+        if (( ${#members[@]} == 1 )); then
+
+            TARGET[${members[0]}]="eth$i"
+
+        else
+
+            for ((p=0; p<${#members[@]}; p++)); do
+                iface=${members[$p]}
+                TARGET[$iface]="eth${i}p$((p + 1))"
+            done
+        fi
+    done
+}
+
+
+# -----------------------------------------------------------------------------
+# Mapping validation
+# -----------------------------------------------------------------------------
+
+validate_mapping() {
+    local -A names=()
+    local -A macs=()
+
+    local iface
+    local target
+
+    for iface in "${IFACES[@]}"; do
+        target=${TARGET[$iface]}
+
+        [[ $target =~ ^eth[0-9]+(p[1-9][0-9]*)?$ ]] ||
+            die "Invalid target '$target'."
+
+        [[ -z ${names[$target]:-} ]] ||
+            die "Duplicate target '$target'."
+
+        [[ -z ${macs[${MAC[$iface]}]:-} ]] ||
+            die "Duplicate MAC '${MAC[$iface]}'."
+
+        names[$target]=$iface
+        macs[${MAC[$iface]}]=$iface
+
+        # This should normally never occur on a fresh Debian install using
+        # predictable interface names. Avoid creating an eth# collision if it
+        # does.
+        if [[ -e /sys/class/net/$target && $target != "$iface" ]]; then
+            die "Target '$target' already exists as another live interface."
+        fi
+    done
+}
+
+show_mapping() {
+    local group
+    local iface
+
+    echo
+    echo "Proposed interface mapping:"
+    echo
+
+    printf \
+        '  %-18s %-18s %s\n' \
+        CURRENT TARGET MAC
+
+    printf \
+        '  %-18s %-18s %s\n' \
+        ------------------ ------------------ -----------------
+
+    for group in "${FINAL_GROUPS[@]}"; do
+        for iface in $group; do
+            printf \
+                '  %-18s %-18s %s\n' \
+                "$iface" \
+                "${TARGET[$iface]}" \
+                "${MAC[$iface]}"
+        done
+    done
+
+    echo
+}
+
+
+# -----------------------------------------------------------------------------
+# systemd .link generation
+# -----------------------------------------------------------------------------
+
+write_links() {
+    local -a old=()
+
+    local file
+    local base
+    local iface
+    local target
+
+    mkdir -p "$LINK_DIR"
+
+    # Files following our naming convention are considered owned by this
+    # script and can be regenerated explicitly.
+    for file in "$LINK_DIR"/40-eth*.link; do
+        [[ -e $file ]] || continue
+
+        base=$(basename "$file")
+
+        if [[ $base =~ ^40-eth[0-9]+(p[1-9][0-9]*)?\.link$ ]]; then
+            old+=("$file")
+        fi
+    done
+
+    if (( ${#old[@]} )); then
+        echo
+        warn "Existing eth# pinning files were found:"
+
+        printf '  %s\n' "${old[@]}"
+
+        echo
+
+        yesno "Remove them and regenerate?" N || exit 1
+
+        rm -f -- "${old[@]}"
+    fi
+
+    echo "Writing systemd .link files:"
+
+    for iface in "${IFACES[@]}"; do
+        target=${TARGET[$iface]}
+        file="$LINK_DIR/40-$target.link"
+
+        cat > "$file" <<EOF
+[Match]
+MACAddress=${MAC[$iface]}
+Type=ether
+
+[Link]
+Name=$target
+EOF
+
+        chmod 0644 "$file"
+
+        echo "  $file"
+    done
+}
+
+
+# -----------------------------------------------------------------------------
+# /etc/network/interfaces update
+# -----------------------------------------------------------------------------
+
+escape_sed_regex() {
+    printf '%s' "$1" | sed 's/[][\\.^$*+?{}|()]/\\&/g'
+}
+
+stage_interfaces() {
+    cp -a "$INTERFACES" "$INTERFACES_NEW"
+
+    local iface
+    local target
+    local old_regex
+
+    for iface in "${IFACES[@]}"; do
+        target=${TARGET[$iface]}
+
+        [[ $iface == "$target" ]] && continue
+
+        old_regex=$(escape_sed_regex "$iface")
+
+        sed -E -i \
+            "s/(^|[^[:alnum:]_-])${old_regex}([^[:alnum:]_-]|$)/\1${target}\2/g" \
+            "$INTERFACES_NEW"
+    done
+
+    if ! grep -Fqx \
+        "# Interface names are pinned by systemd .link files in:" \
+        "$INTERFACES_NEW"
+    then
+        sed -i \
+            "1i\\# Interface names are pinned by systemd .link files in:\\n# $LINK_DIR/\\n" \
+            "$INTERFACES_NEW"
+    fi
+}
+
+commit_interfaces() {
+    local backup
+
+    backup="${INTERFACES}.bak-$(date '+%Y%m%d-%H%M%S')"
+
+    cp -a "$INTERFACES" "$backup"
+    mv "$INTERFACES_NEW" "$INTERFACES"
+
+    echo "Backup: $backup"
+}
+
+
+# -----------------------------------------------------------------------------
+# Main
+# -----------------------------------------------------------------------------
+
+main() {
+    preflight
+
+    discover
+    show_discovery
+
+    choose_mapping
+    validate_mapping
+    show_mapping
+
+    yesno "Create this interface pinning configuration?" N ||
+        exit 0
+
+    write_links
+    stage_interfaces
+
+    echo
+    echo "Proposed changes to $INTERFACES:"
+    echo
+
+    diff -u "$INTERFACES" "$INTERFACES_NEW" || true
+
+    echo
+
+    if ! yesno "Replace $INTERFACES with this configuration?" N; then
+        echo
+
+        warn "$INTERFACES was NOT changed."
+        warn "The .link files already exist; do not reboot until the network"
+        warn "configuration is updated or those .link files are removed."
+
+        echo
+        echo "Proposed file:"
+        echo "  $INTERFACES_NEW"
+
+        exit 2
+    fi
+
+    commit_interfaces
+
+    echo
+    echo "Updating initramfs..."
+
+    update-initramfs -u -k all
+
+    echo
+    echo "NIC pinning complete."
+    echo "Reboot to activate the new interface names."
+}
+
+
+main "$@"
