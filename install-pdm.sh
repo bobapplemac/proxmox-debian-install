@@ -1,14 +1,18 @@
 #!/bin/bash
 
+# Quick start:
+# curl -fsSLO https://raw.githubusercontent.com/bobapplemac/proxmox-debian-install/main/install-pdm.sh && bash install-pdm.sh
+
 # SPDX-License-Identifier: 0BSD
 # Copyright (c) 2026 Andrew J. Moore
 #
 # ------------------------------------------------------------------------------------------
 # File:        install-pdm.sh
-# Revision:    r6
+# Revision:    r7
 # Modified:    2026-08-21
 # Author:      Andrew J. Moore
 # License:     Zero-Clause BSD (0BSD)
+# Source:      https://github.com/bobapplemac/proxmox-debian-install/blob/main/install-pdm.sh
 # Description: Installs Proxmox Datacenter Manager 1 on a supported Debian 13 (Trixie) system.
 #              The script validates that the host already has a persistent static IPv4
 #              configuration in /etc/network/interfaces and that /etc/hosts maps both the
