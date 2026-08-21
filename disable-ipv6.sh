@@ -1,14 +1,18 @@
 #!/bin/bash
 
+# Quick start:
+# curl -fsSLO https://raw.githubusercontent.com/bobapplemac/proxmox-debian-install/main/disable-ipv6.sh && bash disable-ipv6.sh
+
 # SPDX-License-Identifier: 0BSD
 # Copyright (c) 2026 Andrew J. Moore
 #
 # ------------------------------------------------------------------------------------------
 # File:        disable-ipv6.sh
-# Revision:    r2
+# Revision:    r3
 # Modified:    2026-08-20
 # Author:      Andrew J. Moore
 # License:     Zero-Clause BSD (0BSD)
+# Source:      https://github.com/bobapplemac/proxmox-debian-install/blob/main/disable-ipv6.sh
 # Description: Disables IPv6 system-wide using persistent sysctl settings and comments the
 #              standard Debian IPv6 entries in /etc/hosts.
 #
