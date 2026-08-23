@@ -8,8 +8,8 @@
 #
 # ------------------------------------------------------------------------------------------
 # File:        install-pve-part2.sh
-# Revision:    r5
-# Modified:    2026-08-21
+# Revision:    r6
+# Modified:    2026-08-22
 # Author:      Andrew J. Moore
 # License:     Zero-Clause BSD (0BSD)
 # Source:      https://github.com/bobapplemac/proxmox-debian-install/blob/main/install-pve-part2.sh
@@ -17,7 +17,8 @@
 #              (Trixie) system after rebooting into the Proxmox kernel. Installs the Proxmox VE
 #              package set, configures Postfix for local-only delivery, maintains the removable
 #              UEFI GRUB fallback loader when present, disables the custom login-banner service,
-#              enables Chrony and KSM tuning, disables Proxmox enterprise repositories when present,
+#              installs ifupdown2, enables Chrony and KSM tuning, disables Proxmox enterprise
+#              repositories when present,
 #              removes the Debian kernel and os-prober, enables periodic filesystem trimming, creates
 #              /mnt/local as a symlink to /var/lib/vz, verifies the installation, and optionally
 #              reboots.
@@ -43,6 +44,7 @@
 #              Proxmox VE packages and services
 #              Postfix configured for local-only delivery
 #              Chrony enabled
+#              ifupdown2 installed
 #              ksmtuned enabled and active
 #              Removable UEFI GRUB fallback loader maintained when present
 #              update-login-banner.service disabled when present
@@ -387,10 +389,14 @@ install_proxmox_ve() {
             open-iscsi \
             chrony \
             openvswitch-switch \
+            ifupdown2 \
             ksmtuned
 
     package_installed proxmox-ve ||
         die "proxmox-ve does not appear to be installed successfully."
+
+    package_installed ifupdown2 ||
+        die "ifupdown2 does not appear to be installed successfully."
 
     package_installed ksmtuned ||
         die "ksmtuned does not appear to be installed successfully."
@@ -619,6 +625,9 @@ verify_installation() {
     package_installed proxmox-ve ||
         die "Verification failed: proxmox-ve is not installed."
 
+    package_installed ifupdown2 ||
+        die "Verification failed: ifupdown2 is not installed."
+
     package_installed ksmtuned ||
         die "Verification failed: ksmtuned is not installed."
 
@@ -643,6 +652,7 @@ verify_installation() {
     printf '  Kernel:      %s\n' "$kernel"
     printf '  Version:     %s\n' "$(pveversion)"
     printf '  Chrony:      %s\n' "$(systemctl is-active chrony.service)"
+    printf '  ifupdown2:   installed\n'
     printf '  KSM tuning:  %s\n' "$(systemctl is-active ksmtuned.service)"
     printf '  fstrim:      %s\n' "$(systemctl is-enabled fstrim.timer)"
     printf '  Local link:  %s -> %s\n' "$LOCAL_LINK" "$link_target"
