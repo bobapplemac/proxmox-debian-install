@@ -125,7 +125,8 @@ proxmox-pve/
 ├── 50-setup-swapfile.sh
 ├── 60-setup-xfs-storage.sh
 ├── 90-install-pve-part1.sh
-└── 95-install-pve-part2.sh
+├── 95-install-pve-part2.sh
+└── RUNBOOK.txt
 ```
 
 ### Proxmox Backup Server
@@ -156,9 +157,9 @@ Fresh Debian cloud image:
 curl -fsSL https://raw.githubusercontent.com/bobapplemac/proxmox-debian-install/main/quick-start/pdm-cloud.sh | bash
 ```
 
-The quick-start scripts only download and rename the canonical scripts. They do not execute provisioning steps automatically.
+The quick-start scripts only download and rename the canonical scripts and write a `RUNBOOK.txt` containing the recommended workflow. They do not execute provisioning steps automatically.
 
-After downloading, enter the generated directory, review the scripts, and run the applicable files in numeric order. Optional steps and required reboot points are printed by the quick-start script and documented below.
+After downloading, enter the generated directory, review the scripts, and run the applicable files in numeric order. Optional steps and required reboot points are printed by the quick-start script, saved in `RUNBOOK.txt`, and documented below.
 
 ## Network Interface Naming
 

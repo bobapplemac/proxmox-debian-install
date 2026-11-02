@@ -8,14 +8,14 @@
 #
 # ------------------------------------------------------------------------------------------
 # File:        pbs.sh
-# Revision:    r1
-# Modified:    2026-08-21
+# Revision:    r2
+# Modified:    2026-11-02
 # Author:      Andrew J. Moore
 # License:     Zero-Clause BSD (0BSD)
 # Source:      https://github.com/bobapplemac/proxmox-debian-install
 # Description: Downloads an ordered working set of the canonical helper scripts for the Proxmox Backup Server standard Debian installation workflow.
 #              Downloaded working copies receive numeric prefixes reflecting the recommended
-#              execution order. This script only downloads files and marks them executable.
+#              execution order. A persistent runbook records the recommended workflow.
 # ------------------------------------------------------------------------------------------
 
 set -euo pipefail
@@ -49,19 +49,25 @@ curl -fsSL "$BASE_URL/install-pbs.sh" -o 90-install-pbs.sh
 
 chmod +x ./*.sh
 
+cat > RUNBOOK.txt <<'EOF'
+Download complete.
+
+Recommended workflow:
+  20-setup-nics.sh
+      -> reboot
+
+  30-setup-static-ip.sh
+      -> reboot
+
+  40-disable-ipv6.sh          optional
+  50-setup-swapfile.sh        optional; recommended if no swap exists
+  60-setup-xfs-storage.sh     optional; as needed
+
+  90-install-pbs.sh
+      -> reboot
+EOF
+
 echo
-echo "Download complete."
+cat RUNBOOK.txt
 echo
-echo "Recommended workflow:"
-echo "  20-setup-nics.sh"
-echo "      -> reboot"
-echo
-echo "  30-setup-static-ip.sh"
-echo "      -> reboot"
-echo
-echo "  40-disable-ipv6.sh          optional"
-echo "  50-setup-swapfile.sh        optional; recommended if no swap exists"
-echo "  60-setup-xfs-storage.sh     optional; as needed"
-echo
-echo "  90-install-pbs.sh"
-echo "      -> reboot"
+echo "Workflow instructions saved to: $(pwd)/RUNBOOK.txt"

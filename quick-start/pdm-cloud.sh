@@ -8,14 +8,14 @@
 #
 # ------------------------------------------------------------------------------------------
 # File:        pdm-cloud.sh
-# Revision:    r1
-# Modified:    2026-08-21
+# Revision:    r2
+# Modified:    2026-11-02
 # Author:      Andrew J. Moore
 # License:     Zero-Clause BSD (0BSD)
 # Source:      https://github.com/bobapplemac/proxmox-debian-install
 # Description: Downloads an ordered working set of the canonical helper scripts for the Proxmox Datacenter Manager Debian cloud-image installation workflow.
 #              Downloaded working copies receive numeric prefixes reflecting the recommended
-#              execution order. This script only downloads files and marks them executable.
+#              execution order. A persistent runbook records the recommended workflow.
 # ------------------------------------------------------------------------------------------
 
 set -euo pipefail
@@ -50,22 +50,28 @@ curl -fsSL "$BASE_URL/install-pdm.sh" -o 90-install-pdm.sh
 
 chmod +x ./*.sh
 
+cat > RUNBOOK.txt <<'EOF'
+Download complete.
+
+Recommended workflow:
+  10-setup-ifupdown.sh
+      -> reboot
+
+  20-setup-nics.sh            optional if Netplan interface mapping was preserved
+      -> reboot if run
+
+  30-setup-static-ip.sh       optional if converted Netplan was already static
+      -> reboot if run
+
+  40-disable-ipv6.sh          optional
+  50-setup-swapfile.sh        optional; recommended if no swap exists
+  60-setup-xfs-storage.sh     optional; as needed
+
+  90-install-pdm.sh
+      -> reboot
+EOF
+
 echo
-echo "Download complete."
+cat RUNBOOK.txt
 echo
-echo "Recommended workflow:"
-echo "  10-setup-ifupdown.sh"
-echo "      -> reboot"
-echo
-echo "  20-setup-nics.sh            optional if Netplan interface mapping was preserved"
-echo "      -> reboot if run"
-echo
-echo "  30-setup-static-ip.sh       optional if converted Netplan was already static"
-echo "      -> reboot if run"
-echo
-echo "  40-disable-ipv6.sh          optional"
-echo "  50-setup-swapfile.sh        optional; recommended if no swap exists"
-echo "  60-setup-xfs-storage.sh     optional; as needed"
-echo
-echo "  90-install-pdm.sh"
-echo "      -> reboot"
+echo "Workflow instructions saved to: $(pwd)/RUNBOOK.txt"
