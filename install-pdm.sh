@@ -8,8 +8,8 @@
 #
 # ------------------------------------------------------------------------------------------
 # File:        install-pdm.sh
-# Revision:    r7
-# Modified:    2026-08-21
+# Revision:    r8
+# Modified:    2026-11-02
 # Author:      Andrew J. Moore
 # License:     Zero-Clause BSD (0BSD)
 # Source:      https://github.com/bobapplemac/proxmox-debian-install/blob/main/install-pdm.sh
@@ -56,7 +56,8 @@
 #              Current Proxmox Datacenter Manager packages recommend ifupdown2. A system beginning with
 #              classic Debian ifupdown is intentionally upgraded to ifupdown2 after the static
 #              configuration has been validated. The package transition is simulated first and
-#              /etc/network/interfaces is verified unchanged after the transition.
+#              the complete /etc/network/interfaces configuration is verified unchanged after
+#              the transition.
 #
 #              On bare-metal PDM installations, the full Proxmox package set installs the Proxmox
 #              kernel. UEFI systems are normalized to the standard grub-efi-amd64 package when
@@ -339,6 +340,16 @@ network_config_files() {
                 sort
         )
     fi
+}
+
+network_config_fingerprint() {
+    local file
+
+    while IFS= read -r file; do
+        sha256sum "$file"
+    done < <(network_config_files) |
+        sha256sum |
+        awk '{ print $1 }'
 }
 
 hosts_has_loopback_hostname() {
@@ -886,6 +897,24 @@ configure_proxmox_repository() {
 # Package installation
 # ------------------------------------------------------------------------------------------
 
+validate_ifupdown2_configuration() {
+    package_installed ifupdown2 ||
+        die "ifupdown2 is not installed."
+
+    ! package_installed ifupdown ||
+        die "Classic ifupdown is still installed alongside ifupdown2."
+
+    command -v ifquery >/dev/null 2>&1 ||
+        die "ifquery was not found after installing ifupdown2."
+
+    command -v ifreload >/dev/null 2>&1 ||
+        die "ifreload was not found after installing ifupdown2."
+
+    if ! ifquery "$DEFAULT_IFACE" >/dev/null; then
+        die "ifupdown2 could not parse the existing configuration for $DEFAULT_IFACE."
+    fi
+}
+
 simulate_ifupdown2_upgrade() {
     local simulation
     local unexpected
@@ -924,44 +953,32 @@ simulate_ifupdown2_upgrade() {
 }
 
 upgrade_to_ifupdown2() {
-    local before_hash
-    local after_hash
+    local before_fingerprint
+    local after_fingerprint
 
     if package_installed ifupdown2; then
-        package_installed ifupdown &&
-            die "Both ifupdown and ifupdown2 are installed before the network-stack transition."
+        validate_ifupdown2_configuration
         return 0
     fi
 
     simulate_ifupdown2_upgrade
 
-    before_hash=$(sha256sum "$INTERFACES" | awk '{ print $1 }')
+    before_fingerprint=$(network_config_fingerprint)
 
     echo
     echo "Upgrading networking from ifupdown to ifupdown2..."
     DEBIAN_FRONTEND=noninteractive apt-get install -y ifupdown2
 
-    package_installed ifupdown2 ||
-        die "ifupdown2 was not installed successfully."
-
-    ! package_installed ifupdown ||
-        die "Classic ifupdown is still installed after installing ifupdown2."
-
     [[ -f $INTERFACES ]] ||
         die "$INTERFACES is missing after the ifupdown2 package transition."
 
-    after_hash=$(sha256sum "$INTERFACES" | awk '{ print $1 }')
-    [[ $after_hash == "$before_hash" ]] ||
-        die "$INTERFACES changed unexpectedly while installing ifupdown2."
+    after_fingerprint=$(network_config_fingerprint)
+    [[ $after_fingerprint == "$before_fingerprint" ]] ||
+        die "The interface configuration changed unexpectedly while installing ifupdown2."
 
-    command -v ifquery >/dev/null 2>&1 ||
-        die "ifquery was not found after installing ifupdown2."
+    validate_ifupdown2_configuration
 
-    if ! ifquery "$DEFAULT_IFACE" >/dev/null; then
-        die "ifupdown2 could not parse the existing configuration for $DEFAULT_IFACE."
-    fi
-
-    echo "ifupdown2 installed successfully; $INTERFACES was preserved unchanged."
+    echo "ifupdown2 installed successfully; the interface configuration was preserved unchanged."
     echo "The current network configuration has not been intentionally reloaded by this script."
 }
 
@@ -1310,6 +1327,15 @@ verify_installation() {
 
     ! package_installed ifupdown ||
         die "Verification failed: classic ifupdown is still installed."
+
+    command -v ifquery >/dev/null 2>&1 ||
+        die "Verification failed: ifquery is not available."
+
+    command -v ifreload >/dev/null 2>&1 ||
+        die "Verification failed: ifreload is not available."
+
+    ifquery "$DEFAULT_IFACE" >/dev/null ||
+        die "Verification failed: ifupdown2 could not parse the configuration for $DEFAULT_IFACE."
 
     systemctl is-enabled --quiet networking.service 2>/dev/null ||
         die "Verification failed: networking.service is not enabled."

@@ -8,8 +8,8 @@
 #
 # ------------------------------------------------------------------------------------------
 # File:        install-pve-part2.sh
-# Revision:    r6
-# Modified:    2026-08-22
+# Revision:    r7
+# Modified:    2026-11-02
 # Author:      Andrew J. Moore
 # License:     Zero-Clause BSD (0BSD)
 # Source:      https://github.com/bobapplemac/proxmox-debian-install/blob/main/install-pve-part2.sh
@@ -43,8 +43,8 @@
 # Output:
 #              Proxmox VE packages and services
 #              Postfix configured for local-only delivery
+#              Classic ifupdown replaced with ifupdown2
 #              Chrony enabled
-#              ifupdown2 installed
 #              ksmtuned enabled and active
 #              Removable UEFI GRUB fallback loader maintained when present
 #              update-login-banner.service disabled when present
@@ -67,6 +67,8 @@ PVE_ENTERPRISE_SOURCES=/etc/apt/sources.list.d/pve-enterprise.sources
 PVE_ENTERPRISE_LIST=/etc/apt/sources.list.d/pve-enterprise.list
 CEPH_SOURCES=/etc/apt/sources.list.d/ceph.sources
 CEPH_LIST=/etc/apt/sources.list.d/ceph.list
+INTERFACES=/etc/network/interfaces
+INTERFACES_D=/etc/network/interfaces.d
 HOSTS=/etc/hosts
 VZ_PATH=/var/lib/vz
 LOCAL_LINK=/mnt/local
@@ -75,6 +77,8 @@ EFI_REMOVABLE_BOOTLOADER=/boot/efi/EFI/BOOT/BOOTX64.efi
 HOST_SHORT=""
 HOST_FQDN=""
 HOSTS_IPV4=""
+DEFAULT_IFACE=""
+SOURCE_NETWORK_STACK=""
 POSTFIX_MAILNAME=""
 GRUB_REMOVABLE_REINSTALL=0
 
@@ -112,6 +116,17 @@ package_installed() {
 # Preflight
 # ------------------------------------------------------------------------------------------
 
+network_stack_error() {
+    echo "ERROR: $*" >&2
+    echo >&2
+    echo "Proxmox VE installation requires persistent networking to be configured" >&2
+    echo "in /etc/network/interfaces before installation." >&2
+    echo >&2
+    echo "Classic ifupdown is acceptable at this stage; this installer will replace" >&2
+    echo "it with Proxmox-recommended ifupdown2 before installing Proxmox VE." >&2
+    exit 1
+}
+
 check_requirements() {
     local cmd
 
@@ -119,17 +134,20 @@ check_requirements() {
     [[ -t 0 ]] || die "This script requires an interactive terminal."
 
     for cmd in \
-        apt-get awk debconf-set-selections debconf-show dpkg-query findmnt getent grep hostname \
-        ip ln mkdir readlink sed sort systemctl uname update-grub
+        apt-get awk debconf-set-selections debconf-show dpkg dpkg-query find findmnt getent grep hostname \
+        ip ln mkdir readlink sed sha256sum sort systemctl uname update-grub
     do
         command -v "$cmd" >/dev/null 2>&1 ||
             die "Required command '$cmd' was not found."
     done
 
     [[ -f $HOSTS ]] || die "$HOSTS does not exist."
+    [[ -f $INTERFACES ]] || die "$INTERFACES does not exist."
 }
 
 check_platform() {
+    local arch
+
     [[ -r /etc/os-release ]] || die "/etc/os-release was not found."
 
     # shellcheck disable=SC1091
@@ -144,7 +162,82 @@ check_platform() {
     [[ ${VERSION_CODENAME:-} == trixie ]] ||
         die "This script requires Debian 13 (Trixie); detected codename='${VERSION_CODENAME:-unknown}'."
 
-    echo "Platform: Debian 13 (Trixie)"
+    arch=$(dpkg --print-architecture)
+    [[ $arch == amd64 ]] ||
+        die "This script requires amd64; detected architecture '$arch'."
+
+    echo "Platform: Debian 13 (Trixie), amd64"
+}
+
+check_network_stack() {
+    local active_netplan=false
+    local have_ifupdown=false
+    local have_ifupdown2=false
+
+    package_installed ifupdown && have_ifupdown=true
+    package_installed ifupdown2 && have_ifupdown2=true
+
+    if $have_ifupdown && $have_ifupdown2; then
+        network_stack_error "Both ifupdown and ifupdown2 are installed; the networking stack is ambiguous."
+    fi
+
+    if ! $have_ifupdown && ! $have_ifupdown2; then
+        network_stack_error "Neither ifupdown nor ifupdown2 is installed."
+    fi
+
+    if $have_ifupdown2; then
+        SOURCE_NETWORK_STACK=ifupdown2
+    else
+        SOURCE_NETWORK_STACK=ifupdown
+    fi
+
+    systemctl is-enabled --quiet networking.service 2>/dev/null ||
+        network_stack_error "networking.service is not enabled."
+
+    if systemctl is-enabled --quiet systemd-networkd.service 2>/dev/null; then
+        network_stack_error "systemd-networkd.service is still enabled."
+    fi
+
+    if systemctl is-active --quiet systemd-networkd.service 2>/dev/null; then
+        network_stack_error "systemd-networkd.service is still active."
+    fi
+
+    if package_installed netplan.io || package_installed netplan-generator; then
+        network_stack_error "Netplan runtime packages are still installed."
+    fi
+
+    if compgen -G '/etc/netplan/*.yaml' >/dev/null; then
+        active_netplan=true
+    fi
+
+    if $active_netplan; then
+        network_stack_error "Active Netplan YAML configuration still exists under /etc/netplan."
+    fi
+}
+
+network_config_files() {
+    local file
+
+    printf '%s\n' "$INTERFACES"
+
+    if [[ -d $INTERFACES_D ]]; then
+        while IFS= read -r file; do
+            printf '%s\n' "$file"
+        done < <(
+            find "$INTERFACES_D" -maxdepth 1 \( -type f -o -type l \) -print 2>/dev/null |
+                sort
+        )
+    fi
+}
+
+network_config_fingerprint() {
+    local file
+
+    while IFS= read -r file; do
+        sha256sum "$file"
+    done < <(network_config_files) |
+        sha256sum |
+        awk '{ print $1 }'
 }
 
 check_pve_kernel() {
@@ -198,6 +291,19 @@ check_network_and_hostname() {
     local resolved_ipv4
     local local_ipv4
 
+    DEFAULT_IFACE=$(ip -4 route show default | awk '
+        {
+            for (i = 1; i <= NF; i++) {
+                if ($i == "dev") {
+                    print $(i + 1)
+                    exit
+                }
+            }
+        }
+    ')
+
+    [[ -n $DEFAULT_IFACE ]] || die "No IPv4 default-route interface was detected."
+
     HOST_SHORT=$(hostname --short 2>/dev/null || true)
     HOST_FQDN=$(hostname --fqdn 2>/dev/null || true)
 
@@ -233,6 +339,12 @@ check_network_and_hostname() {
     echo
     echo "Network/hostname preflight passed:"
     echo
+    if [[ $SOURCE_NETWORK_STACK == ifupdown ]]; then
+        printf '  Network:    %s\n' "ifupdown (will upgrade to ifupdown2)"
+    else
+        printf '  Network:    %s\n' "ifupdown2"
+    fi
+    printf '  Interface:  %s\n' "$DEFAULT_IFACE"
     printf '  Hostname:   %s\n' "$HOST_SHORT"
     printf '  FQDN:       %s\n' "$HOST_FQDN"
     printf '  IPv4:       %s\n' "$HOSTS_IPV4"
@@ -257,6 +369,7 @@ check_preflight() {
     check_requirements
     check_platform
     check_pve_kernel
+    check_network_stack
     check_network_and_hostname
     check_repository
 }
@@ -372,12 +485,136 @@ preseed_postfix() {
         | debconf-set-selections
 }
 
+validate_ifupdown2_configuration() {
+    package_installed ifupdown2 ||
+        die "ifupdown2 is not installed."
+
+    ! package_installed ifupdown ||
+        die "Classic ifupdown is still installed alongside ifupdown2."
+
+    command -v ifquery >/dev/null 2>&1 ||
+        die "ifquery was not found after installing ifupdown2."
+
+    command -v ifreload >/dev/null 2>&1 ||
+        die "ifreload was not found after installing ifupdown2."
+
+    if ! ifquery "$DEFAULT_IFACE" >/dev/null; then
+        die "ifupdown2 could not parse the existing configuration for $DEFAULT_IFACE."
+    fi
+}
+
+simulate_ifupdown2_upgrade() {
+    local simulation
+    local unexpected
+
+    if package_installed ifupdown2; then
+        echo
+        echo "ifupdown2 is already installed; no network-stack package transition is required."
+        return 0
+    fi
+
+    echo
+    echo "Simulating ifupdown -> ifupdown2 upgrade..."
+
+    simulation=$(apt-get -s install ifupdown2 2>&1) || {
+        printf '%s\n' "$simulation" >&2
+        die "APT could not simulate the ifupdown2 installation."
+    }
+
+    printf '%s\n' "$simulation" |
+        awk '/^(Inst|Remv|Purg) / { print "  " $0 }'
+
+    grep -Eq '^Inst ifupdown2([[:space:]]|$)' <<< "$simulation" ||
+        die "APT simulation did not show ifupdown2 being installed."
+
+    unexpected=$(printf '%s\n' "$simulation" |
+        awk '/^(Remv|Purg) / && $2 != "ifupdown" { print $2 }' |
+        sort -u)
+
+    if [[ -n $unexpected ]]; then
+        echo
+        warn "Installing ifupdown2 would remove additional packages:"
+        printf '  %s\n' $unexpected
+        echo
+        die "Refusing the ifupdown2 transition because packages other than classic ifupdown would be removed."
+    fi
+}
+
+upgrade_to_ifupdown2() {
+    local before_fingerprint
+    local after_fingerprint
+
+    if package_installed ifupdown2; then
+        validate_ifupdown2_configuration
+        return 0
+    fi
+
+    simulate_ifupdown2_upgrade
+    before_fingerprint=$(network_config_fingerprint)
+
+    echo
+    echo "Upgrading networking from ifupdown to ifupdown2..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ifupdown2
+
+    [[ -f $INTERFACES ]] ||
+        die "$INTERFACES is missing after the ifupdown2 package transition."
+
+    after_fingerprint=$(network_config_fingerprint)
+    [[ $after_fingerprint == "$before_fingerprint" ]] ||
+        die "The interface configuration changed unexpectedly while installing ifupdown2."
+
+    validate_ifupdown2_configuration
+
+    echo "ifupdown2 installed successfully; the interface configuration was preserved unchanged."
+    echo "The current network configuration has not been intentionally reloaded by this script."
+}
+
+simulate_proxmox_ve_install() {
+    local simulation
+
+    echo
+    echo "Simulating Proxmox VE package installation..."
+
+    simulation=$(
+        apt-get -s install \
+            proxmox-ve \
+            postfix \
+            open-iscsi \
+            chrony \
+            openvswitch-switch \
+            ifupdown2 \
+            ksmtuned \
+            2>&1
+    ) || {
+        printf '%s\n' "$simulation" >&2
+        die "APT could not simulate the Proxmox VE installation."
+    }
+
+    if grep -Eq '^Remv ifupdown2([[:space:]]|$)' <<< "$simulation"; then
+        echo
+        printf '%s\n' "$simulation"
+        echo
+        die "APT would remove ifupdown2 during the Proxmox VE installation."
+    fi
+
+    if grep -Eq '^Inst ifupdown([[:space:]]|$)' <<< "$simulation"; then
+        echo
+        printf '%s\n' "$simulation"
+        echo
+        die "APT would reinstall classic ifupdown during the Proxmox VE installation."
+    fi
+
+    echo "APT simulation confirms that ifupdown2 will remain the active networking package."
+}
+
 install_proxmox_ve() {
     echo
     echo "Updating package indexes..."
     apt-get update
 
     preseed_postfix
+    upgrade_to_ifupdown2
+    simulate_proxmox_ve_install
 
     echo
     echo "Installing Proxmox VE packages..."
@@ -397,6 +634,11 @@ install_proxmox_ve() {
 
     package_installed ifupdown2 ||
         die "ifupdown2 does not appear to be installed successfully."
+
+    ! package_installed ifupdown ||
+        die "Classic ifupdown is unexpectedly installed after Proxmox VE installation."
+
+    validate_ifupdown2_configuration
 
     package_installed ksmtuned ||
         die "ksmtuned does not appear to be installed successfully."
@@ -627,6 +869,24 @@ verify_installation() {
 
     package_installed ifupdown2 ||
         die "Verification failed: ifupdown2 is not installed."
+
+    ! package_installed ifupdown ||
+        die "Verification failed: classic ifupdown is still installed."
+
+    command -v ifquery >/dev/null 2>&1 ||
+        die "Verification failed: ifquery is not available."
+
+    command -v ifreload >/dev/null 2>&1 ||
+        die "Verification failed: ifreload is not available."
+
+    ifquery "$DEFAULT_IFACE" >/dev/null ||
+        die "Verification failed: ifupdown2 could not parse the configuration for $DEFAULT_IFACE."
+
+    systemctl is-enabled --quiet networking.service 2>/dev/null ||
+        die "Verification failed: networking.service is not enabled."
+
+    ! systemctl is-enabled --quiet systemd-networkd.service 2>/dev/null ||
+        die "Verification failed: systemd-networkd.service is enabled."
 
     package_installed ksmtuned ||
         die "Verification failed: ksmtuned is not installed."

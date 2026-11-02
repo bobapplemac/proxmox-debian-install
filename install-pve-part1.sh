@@ -8,8 +8,8 @@
 #
 # ------------------------------------------------------------------------------------------
 # File:        install-pve-part1.sh
-# Revision:    r3
-# Modified:    2026-08-21
+# Revision:    r4
+# Modified:    2026-11-02
 # Author:      Andrew J. Moore
 # License:     Zero-Clause BSD (0BSD)
 # Source:      https://github.com/bobapplemac/proxmox-debian-install/blob/main/install-pve-part1.sh
@@ -58,6 +58,7 @@ LOCAL_IPV4=""
 HOST_SHORT=""
 HOST_FQDN=""
 HOSTS_IPV4=""
+SOURCE_NETWORK_STACK=""
 KEY_TMP=""
 
 
@@ -84,6 +85,11 @@ yesno() {
     fi
 }
 
+package_installed() {
+    dpkg-query -W -f='${Status}\n' "$1" 2>/dev/null |
+        grep -Fxq 'install ok installed'
+}
+
 cleanup() {
     if [[ -n $KEY_TMP && -e $KEY_TMP ]]; then
         rm -f "$KEY_TMP"
@@ -97,6 +103,17 @@ trap cleanup EXIT
 # Preflight
 # ------------------------------------------------------------------------------------------
 
+network_stack_error() {
+    echo "ERROR: $*" >&2
+    echo >&2
+    echo "Proxmox VE installation requires persistent networking to be configured" >&2
+    echo "in /etc/network/interfaces before installation." >&2
+    echo >&2
+    echo "Classic ifupdown is acceptable at this stage; installation stage 2 will" >&2
+    echo "replace it with Proxmox-recommended ifupdown2." >&2
+    exit 1
+}
+
 check_requirements() {
     local cmd
 
@@ -104,7 +121,7 @@ check_requirements() {
     [[ -t 0 ]] || die "This script requires an interactive terminal."
 
     for cmd in \
-        apt-get awk dpkg-query find getent grep hostname install ip mktemp rm sed sha256sum \
+        apt-get awk dpkg dpkg-query find getent grep hostname install ip mktemp rm sed sha256sum \
         sort systemctl uname wget
     do
         command -v "$cmd" >/dev/null 2>&1 ||
@@ -116,6 +133,8 @@ check_requirements() {
 }
 
 check_platform() {
+    local arch
+
     [[ -r /etc/os-release ]] || die "/etc/os-release was not found."
 
     # shellcheck disable=SC1091
@@ -130,7 +149,57 @@ check_platform() {
     [[ ${VERSION_CODENAME:-} == trixie ]] ||
         die "This script requires Debian 13 (Trixie); detected codename='${VERSION_CODENAME:-unknown}'."
 
-    echo "Platform: Debian 13 (Trixie)"
+    arch=$(dpkg --print-architecture)
+    [[ $arch == amd64 ]] ||
+        die "This script requires amd64; detected architecture '$arch'."
+
+    echo "Platform: Debian 13 (Trixie), amd64"
+}
+
+check_network_stack() {
+    local active_netplan=false
+    local have_ifupdown=false
+    local have_ifupdown2=false
+
+    package_installed ifupdown && have_ifupdown=true
+    package_installed ifupdown2 && have_ifupdown2=true
+
+    if $have_ifupdown && $have_ifupdown2; then
+        network_stack_error "Both ifupdown and ifupdown2 are installed; the networking stack is ambiguous."
+    fi
+
+    if ! $have_ifupdown && ! $have_ifupdown2; then
+        network_stack_error "Neither ifupdown nor ifupdown2 is installed."
+    fi
+
+    if $have_ifupdown2; then
+        SOURCE_NETWORK_STACK=ifupdown2
+    else
+        SOURCE_NETWORK_STACK=ifupdown
+    fi
+
+    systemctl is-enabled --quiet networking.service 2>/dev/null ||
+        network_stack_error "networking.service is not enabled."
+
+    if systemctl is-enabled --quiet systemd-networkd.service 2>/dev/null; then
+        network_stack_error "systemd-networkd.service is still enabled."
+    fi
+
+    if systemctl is-active --quiet systemd-networkd.service 2>/dev/null; then
+        network_stack_error "systemd-networkd.service is still active."
+    fi
+
+    if package_installed netplan.io || package_installed netplan-generator; then
+        network_stack_error "Netplan runtime packages are still installed."
+    fi
+
+    if compgen -G '/etc/netplan/*.yaml' >/dev/null; then
+        active_netplan=true
+    fi
+
+    if $active_netplan; then
+        network_stack_error "Active Netplan YAML configuration still exists under /etc/netplan."
+    fi
 }
 
 interface_has_static_config() {
@@ -245,6 +314,11 @@ check_network_and_hostname() {
     echo
     echo "Network/hostname preflight passed:"
     echo
+    if [[ $SOURCE_NETWORK_STACK == ifupdown ]]; then
+        printf '  Network:    %s\n' "ifupdown (will upgrade to ifupdown2 in stage 2)"
+    else
+        printf '  Network:    %s\n' "ifupdown2"
+    fi
     printf '  Hostname:   %s\n' "$HOST_SHORT"
     printf '  FQDN:       %s\n' "$HOST_FQDN"
     printf '  Interface:  %s\n' "$DEFAULT_IFACE"
@@ -255,6 +329,7 @@ check_network_and_hostname() {
 check_preflight() {
     check_requirements
     check_platform
+    check_network_stack
     check_network_and_hostname
 }
 

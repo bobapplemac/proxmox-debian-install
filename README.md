@@ -271,6 +271,7 @@ Completes the Proxmox VE installation after the system has booted into a `-pve` 
 Among other tasks, it:
 
 - Installs the full `proxmox-ve` package set
+- Safely replaces classic Debian `ifupdown` with Proxmox-recommended `ifupdown2`
 - Configures Postfix for local-only delivery
 - Installs and enables Chrony
 - Installs and enables `ksmtuned`
@@ -299,6 +300,9 @@ Bare metal:
     Proxmox kernel installed
 ```
 
+The installer accepts either classic Debian `ifupdown` or `ifupdown2` as its starting network
+backend. Classic `ifupdown` is safely replaced with `ifupdown2` before PBS is installed.
+
 On bare-metal UEFI installations, the script also validates and prepares the GRUB bootloader before rebooting into the Proxmox kernel.
 
 ### `install-pdm.sh`
@@ -308,6 +312,9 @@ Installs Proxmox Datacenter Manager.
 The script automatically selects between the VM-oriented and bare-metal package sets.
 
 The bare-metal path installs the Proxmox kernel and performs the corresponding bootloader and Debian-kernel cleanup.
+
+As with the other product installers, classic Debian `ifupdown` is accepted as a starting point
+and replaced with `ifupdown2` during installation.
 
 ## Recommended Installation Order
 
@@ -476,7 +483,30 @@ systemd-networkd
 ifupdown
 ```
 
-The PBS and PDM installers subsequently replace classic `ifupdown` with Proxmox-recommended `ifupdown2`.
+The classic `ifupdown` state created by this conversion is transitional. The PVE, PBS, and PDM
+installers all require `ifupdown2` as their final network backend and safely replace classic
+`ifupdown` when necessary.
+
+## Network Backend Policy
+
+Fresh Debian 13 netinst systems normally begin with classic `ifupdown`. That is an acceptable
+starting point for these workflows, but `ifupdown2` is the required final backend for every
+completed Proxmox VE, Proxmox Backup Server, and Proxmox Datacenter Manager installation.
+
+Each product installer:
+
+- Accepts either classic `ifupdown` or `ifupdown2` as its starting state
+- Refuses ambiguous systems where both packages are installed
+- Simulates the `ifupdown` to `ifupdown2` package transition before applying it
+- Refuses the transition if packages other than classic `ifupdown` would be removed
+- Verifies that `/etc/network/interfaces` and files under `/etc/network/interfaces.d` remain unchanged
+- Validates the existing interface configuration with `ifupdown2`
+- Does not intentionally reload or restart the live network during the transition
+- Verifies that classic `ifupdown` is absent and `ifupdown2` is active at the end
+
+The cloud-image conversion helper still uses classic `ifupdown` as an intermediate backend because
+the current DHCP and static-address preparation workflow depends on `dhcpcd`. The product installer
+performs the final migration to `ifupdown2` after that preparation is complete.
 
 ## Reboots Are Intentional
 
