@@ -8,12 +8,12 @@
 #
 # ------------------------------------------------------------------------------------------
 # File:        setup-ifupdown.sh
-# Revision:    r11
-# Modified:    2026-08-21
+# Revision:    r12
+# Modified:    2026-11-02
 # Author:      Andrew J. Moore
 # License:     Zero-Clause BSD (0BSD)
 # Source:      https://github.com/bobapplemac/proxmox-debian-install/blob/main/setup-ifupdown.sh
-# Description: Converts a simple Debian 13 Netplan/systemd-networkd configuration to ifupdown.
+# Description: Converts a simple Debian 13 Netplan/systemd-networkd configuration to ifupdown2.
 #              The script is intentionally limited to one configured Ethernet interface with
 #              either DHCPv4 or one static IPv4 address. Simple cloud-image MAC match/set-name
 #              configurations are supported. When Netplan uses set-name, the rename is preserved
@@ -22,17 +22,16 @@
 #              configuration, while Netplan's merged configuration is parsed to validate scope and
 #              determine mode.
 #
-#              The conversion installs ifupdown and dhcpcd-base, writes /etc/network/interfaces,
-#              preserves the current resolver state in a regular /etc/resolv.conf, configures
-#              dhcpcd to use a MAC-based client ID instead of DUID, preserves Netplan set-name
+#              The conversion installs ifupdown2 and, for DHCP configurations, isc-dhcp-client;
+#              writes /etc/network/interfaces; preserves the current resolver state in a regular
+#              /etc/resolv.conf; preserves Netplan set-name
 #              interface naming with systemd .link files when required, disables cloud-init network
 #              generation, disables Netplan YAML files by appending .disabled, disables
 #              systemd-networkd for future boots, enables networking.service, and removes the
 #              Netplan runtime/generator packages. For static IPv4 conversions, the script also
 #              updates /etc/hosts so the system hostname resolves to the real static IPv4 address
-#              instead of 127.0.1.1, adds "nohook resolv.conf" to /etc/dhcpcd.conf so the
-#              preserved static resolver configuration cannot be overwritten by dhcpcd, and
-#              disables cloud-init management of /etc/hosts so the hostname mapping persists.
+#              instead of 127.0.1.1 and disables cloud-init management of /etc/hosts so the
+#              hostname mapping persists.
 #              If the system does not yet have an FQDN, a resolver-provided default domain or
 #              single search domain is used automatically; otherwise the user is prompted for
 #              the domain to use.
@@ -70,8 +69,11 @@
 #              current session and is disabled only for future boots. Reboot after conversion
 #              before making further network changes.
 #
-#              Staged interfaces are validated with classic ifupdown before
+#              Staged interfaces are validated with ifupdown2 before
 #              /etc/network/interfaces is replaced.
+#
+#              A system previously converted by an older revision of this script from Netplan
+#              to classic ifupdown is upgraded in place to ifupdown2 without reloading networking.
 #
 #              Existing /etc/netplan/*.yaml files are renamed to *.yaml.disabled. Netplan config
 #              originating from /run/netplan or /lib/netplan is considered unsupported and causes
@@ -83,7 +85,6 @@ set -euo pipefail
 INTERFACES=/etc/network/interfaces
 INTERFACES_NEW=/etc/network/interfaces.new
 INTERFACES_D=/etc/network/interfaces.d
-DHCPCD_CONF=/etc/dhcpcd.conf
 HOSTS=/etc/hosts
 HOSTS_NEW=/etc/hosts.new
 RESOLV_CONF=/etc/resolv.conf
@@ -122,6 +123,7 @@ CLOUD_INIT_DISABLED=false
 CLOUD_NETWORK_DISABLED=false
 
 STATE_MISMATCH=0
+LEGACY_MIGRATION_ONLY=false
 
 declare -a LIVE_DNS LIVE_SEARCH NETPLAN_FILES
 
@@ -313,8 +315,30 @@ print_stack_state() {
 }
 
 classify_stack() {
-    # Intentional post-conversion/pre-reboot state: classic ifupdown is fully configured,
-    # networkd has been disabled for future boots, but it may still be running now.
+    if $IFUPDOWN_INSTALLED && $IFUPDOWN2_INSTALLED; then
+        die "Both ifupdown and ifupdown2 are installed; the networking stack is ambiguous."
+    fi
+
+    # Completed modern conversion. networkd may still be active until the required reboot.
+    if $IFUPDOWN2_INSTALLED &&
+       ! $IFUPDOWN_INSTALLED &&
+       [[ -f $INTERFACES ]] &&
+       $NETWORKING_ENABLED &&
+       ! $NETWORKD_ENABLED &&
+       ! $NETPLAN_INSTALLED &&
+       ! $NETPLAN_GENERATOR_INSTALLED
+    then
+        if $NETWORKD_ACTIVE; then
+            echo "Detected network stack: ifupdown2 (conversion complete; reboot pending)"
+        else
+            echo "Detected network stack: ifupdown2"
+        fi
+        echo "No conversion is required."
+        exit 0
+    fi
+
+    # Older revisions intentionally produced this state. Upgrade it without requiring
+    # Netplan source files to still be present.
     if $IFUPDOWN_INSTALLED &&
        ! $IFUPDOWN2_INSTALLED &&
        [[ -f $INTERFACES ]] &&
@@ -323,19 +347,9 @@ classify_stack() {
        ! $NETPLAN_INSTALLED &&
        ! $NETPLAN_GENERATOR_INSTALLED
     then
-        if $NETWORKD_ACTIVE; then
-            echo "Detected network stack: ifupdown (conversion complete; reboot pending)"
-        else
-            echo "Detected network stack: ifupdown"
-        fi
-        echo "No conversion is required."
-        exit 0
-    fi
-
-    # This script intentionally targets Debian's classic ifupdown stack. Do not silently
-    # reinterpret a system that already has ifupdown2 installed.
-    if $IFUPDOWN2_INSTALLED; then
-        die "ifupdown2 is installed; this script targets classic ifupdown and will not modify an existing ifupdown2 installation."
+        echo "Detected network stack: legacy ifupdown conversion"
+        LEGACY_MIGRATION_ONLY=true
+        return 0
     fi
 
     if $NETWORKD_ENABLED && $NETWORKING_ENABLED; then
@@ -350,8 +364,11 @@ classify_stack() {
         return 0
     fi
 
-    if $IFUPDOWN_INSTALLED && [[ -f $INTERFACES ]] && ! $NETWORKD_ENABLED; then
-        die "The system appears partially converted to ifupdown, but Netplan components remain or networking.service is not enabled."
+    if { $IFUPDOWN_INSTALLED || $IFUPDOWN2_INSTALLED; } &&
+       [[ -f $INTERFACES ]] &&
+       ! $NETWORKD_ENABLED
+    then
+        die "The system appears partially converted, but Netplan components remain or networking.service is not enabled."
     fi
 
     die "Unable to identify a supported Netplan/systemd-networkd source configuration."
@@ -412,7 +429,7 @@ preflight() {
     # converted system no longer has Netplan installed and should still exit cleanly.
     for cmd in \
         apt-get awk cat chmod cp date diff dpkg-query find grep hostname ip mkdir mktemp mv \
-        python3 rm sed sort systemctl touch tr update-initramfs
+        python3 rm sed sha256sum sort systemctl touch tr update-initramfs
     do
         command -v "$cmd" >/dev/null 2>&1 ||
             die "Required command '$cmd' was not found."
@@ -421,6 +438,8 @@ preflight() {
     collect_stack_state
     print_stack_state
     classify_stack
+
+    $LEGACY_MIGRATION_ONLY && return 0
 
     # Reaching this point means a Netplan source configuration needs to be converted.
     command -v netplan >/dev/null 2>&1 ||
@@ -1040,7 +1059,7 @@ show_configuration() {
     if (( STATE_MISMATCH )); then
         echo
         warn "The persistent Netplan configuration differs from the current live state."
-        warn "The generated ifupdown configuration will preserve the CURRENT LIVE state."
+        warn "The generated ifupdown2 configuration will preserve the CURRENT LIVE state."
         echo
         yesno "Continue with the live values?" N || exit 1
     else
@@ -1189,8 +1208,7 @@ stage_resolv_conf() {
     {
         if [[ $MODE == static ]]; then
             printf '%s\n' \
-                '# Static DNS configuration preserved by setup-ifupdown.sh during Netplan conversion.' \
-                '# dhcpcd DNS updates are disabled by "nohook resolv.conf" in /etc/dhcpcd.conf.'
+                '# Static DNS configuration preserved by setup-ifupdown.sh during Netplan conversion.'
         else
             printf '%s\n' \
                 '# Resolver state preserved by setup-ifupdown.sh during Netplan conversion.' \
@@ -1263,7 +1281,7 @@ show_staged_files() {
     fi
 
     echo
-    yesno "Convert this system to ifupdown?" N || exit 0
+    yesno "Convert this system to ifupdown2?" N || exit 0
 }
 
 
@@ -1271,46 +1289,158 @@ show_staged_files() {
 # Conversion
 # ------------------------------------------------------------------------------------------
 
-install_ifupdown() {
-    echo
-    echo "Installing ifupdown and dhcpcd-base..."
+network_config_files() {
+    local file
 
-    apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y ifupdown dhcpcd-base
+    printf '%s\n' "$INTERFACES"
 
-    package_installed ifupdown ||
-        die "ifupdown was not installed successfully."
-
-    ! package_installed ifupdown2 ||
-        die "ifupdown2 is unexpectedly installed after installing ifupdown."
-
-    command -v ifquery >/dev/null 2>&1 ||
-        die "ifupdown was installed, but ifquery was not found."
+    if [[ -d $INTERFACES_D ]]; then
+        while IFS= read -r file; do
+            printf '%s\n' "$file"
+        done < <(
+            find "$INTERFACES_D" -maxdepth 1 \( -type f -o -type l \) -print 2>/dev/null |
+                sort
+        )
+    fi
 }
 
-configure_dhcpcd() {
-    echo
-    echo "Configuring dhcpcd defaults..."
+network_config_fingerprint() {
+    local file
 
-    [[ -f $DHCPCD_CONF ]] || touch "$DHCPCD_CONF"
+    while IFS= read -r file; do
+        sha256sum "$file"
+    done < <(network_config_files) |
+        sha256sum |
+        awk '{ print $1 }'
+}
 
-    sed -Ei \
-        's/^[[:space:]]*duid([[:space:]].*)?$/#duid/;
-         s/^[[:space:]]*#?[[:space:]]*clientid([[:space:]].*)?$/clientid/' \
-        "$DHCPCD_CONF"
+validate_ifupdown2_installation() {
+    package_installed ifupdown2 ||
+        die "ifupdown2 was not installed successfully."
 
-    grep -qxF 'clientid' "$DHCPCD_CONF" ||
-        printf '%s\n' 'clientid' >> "$DHCPCD_CONF"
+    ! package_installed ifupdown ||
+        die "Classic ifupdown is still installed alongside ifupdown2."
 
-    if [[ $MODE == static ]] &&
-       ! grep -Eq '^[[:space:]]*nohook[[:space:]].*resolv\.conf([[:space:],]|$)' "$DHCPCD_CONF"
-    then
-        [[ ! -s $DHCPCD_CONF ]] || printf '\n' >> "$DHCPCD_CONF"
-        printf '%s\n' \
-            '# DNS is statically configured in /etc/resolv.conf by setup-ifupdown.sh.' \
-            'nohook resolv.conf' \
-            >> "$DHCPCD_CONF"
+    command -v ifquery >/dev/null 2>&1 ||
+        die "ifquery was not found after installing ifupdown2."
+
+    command -v ifreload >/dev/null 2>&1 ||
+        die "ifreload was not found after installing ifupdown2."
+}
+
+simulate_ifupdown2_install() {
+    local simulation
+    local unexpected
+    local -a packages=(ifupdown2)
+
+    if [[ $MODE == dhcp ]]; then
+        packages+=(isc-dhcp-client)
     fi
+
+    echo
+    echo "Simulating ifupdown2 installation..."
+
+    simulation=$(apt-get -s install "${packages[@]}" 2>&1) || {
+        printf '%s\n' "$simulation" >&2
+        die "APT could not simulate the ifupdown2 installation."
+    }
+
+    printf '%s\n' "$simulation" |
+        awk '/^(Inst|Remv|Purg) / { print "  " $0 }'
+
+    if ! package_installed ifupdown2; then
+        grep -Eq '^Inst ifupdown2([[:space:]]|$)' <<< "$simulation" ||
+            die "APT simulation did not show ifupdown2 being installed."
+    fi
+
+    unexpected=$(printf '%s\n' "$simulation" |
+        awk '/^(Remv|Purg) / && $2 != "ifupdown" { print $2 }' |
+        sort -u)
+
+    if [[ -n $unexpected ]]; then
+        echo
+        warn "Installing ifupdown2 would remove additional packages:"
+        printf '  %s\n' $unexpected
+        echo
+        die "Refusing the ifupdown2 transition because packages other than classic ifupdown would be removed."
+    fi
+}
+
+install_ifupdown2() {
+    local -a packages=(ifupdown2)
+
+    if [[ $MODE == dhcp ]]; then
+        packages+=(isc-dhcp-client)
+    fi
+
+    echo
+    echo "Installing ifupdown2..."
+
+    apt-get update
+    simulate_ifupdown2_install
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
+
+    validate_ifupdown2_installation
+
+    if [[ $MODE == dhcp ]]; then
+        package_installed isc-dhcp-client ||
+            die "isc-dhcp-client was not installed for the DHCP configuration."
+
+        command -v dhclient >/dev/null 2>&1 ||
+            die "dhclient was not found after installing isc-dhcp-client."
+    fi
+}
+
+migrate_legacy_ifupdown() {
+    local before_fingerprint
+    local after_fingerprint
+    local -a config_files=()
+    local -a packages=(ifupdown2)
+
+    echo
+    echo "Upgrading the existing classic ifupdown configuration to ifupdown2..."
+
+    mapfile -t config_files < <(network_config_files)
+
+    if awk '
+        /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+        $1 == "iface" && $3 == "inet" && $4 == "dhcp" { found = 1 }
+        END { exit !found }
+    ' "${config_files[@]}"
+    then
+        MODE=dhcp
+        packages+=(isc-dhcp-client)
+    else
+        MODE=static
+    fi
+    apt-get update
+    simulate_ifupdown2_install
+    before_fingerprint=$(network_config_fingerprint)
+
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
+
+    after_fingerprint=$(network_config_fingerprint)
+    [[ $after_fingerprint == "$before_fingerprint" ]] ||
+        die "The interface configuration changed unexpectedly while installing ifupdown2."
+
+    validate_ifupdown2_installation
+
+    if [[ $MODE == dhcp ]]; then
+        package_installed isc-dhcp-client ||
+            die "isc-dhcp-client was not installed for the existing DHCP configuration."
+        command -v dhclient >/dev/null 2>&1 ||
+            die "dhclient was not found after installing isc-dhcp-client."
+    fi
+
+    if ! ifquery -a >/dev/null; then
+        die "ifupdown2 could not parse the existing interface configuration."
+    fi
+
+    echo
+    echo "Legacy network-stack migration complete."
+    echo "The interface configuration was preserved unchanged."
+    echo "The current network connection was intentionally left untouched."
+    echo "Reboot before making further network changes."
 }
 
 write_persistent_link() {
@@ -1350,7 +1480,7 @@ update_initramfs_for_link() {
 
 validate_staged_interfaces() {
     echo
-    echo "Validating staged ifupdown configuration..."
+    echo "Validating staged ifupdown2 configuration..."
 
     if ! ifquery -i "$INTERFACES_NEW" lo >/dev/null; then
         die "$INTERFACES_NEW does not contain a valid loopback configuration."
@@ -1360,14 +1490,14 @@ validate_staged_interfaces() {
         die "$INTERFACES_NEW does not contain a valid configuration for $IFACE."
     fi
 
-    # Dry-run the selected interface as an additional check that ifupdown can
+    # Dry-run the selected interface as an additional check that ifupdown2 can
     # translate the stanza into the expected low-level commands without changing
     # the currently active network session.
     if ! ifup -n -i "$INTERFACES_NEW" "$IFACE" >/dev/null; then
-        die "$INTERFACES_NEW failed the ifupdown dry-run for $IFACE."
+        die "$INTERFACES_NEW failed the ifupdown2 dry-run for $IFACE."
     fi
 
-    echo "Staged ifupdown configuration validated successfully."
+    echo "Staged ifupdown2 configuration validated successfully."
 }
 
 commit_interfaces() {
@@ -1402,7 +1532,7 @@ disable_cloud_networking() {
     mkdir -p /etc/cloud/cloud.cfg.d
 
     printf '%s\n' \
-        '# Network configuration is managed by ifupdown.' \
+        '# Network configuration is managed by ifupdown2.' \
         'network: {config: disabled}' \
         > "$CLOUD_NETWORK_DISABLE"
 }
@@ -1496,12 +1626,18 @@ verify_conversion() {
         printf '  %-39s %s\n' "persistent interface pin:" "$LINK_FILE"
     fi
 
-    $IFUPDOWN_INSTALLED || die "ifupdown is not installed after conversion."
-    ! $IFUPDOWN2_INSTALLED || die "ifupdown2 is unexpectedly installed after conversion."
+    ! $IFUPDOWN_INSTALLED || die "Classic ifupdown is still installed after conversion."
+    $IFUPDOWN2_INSTALLED || die "ifupdown2 is not installed after conversion."
     $NETWORKING_ENABLED || die "networking.service is not enabled after conversion."
     ! $NETWORKD_ENABLED || die "systemd-networkd is still enabled after conversion."
     ! $NETPLAN_INSTALLED || die "netplan.io is still installed after conversion."
     ! $NETPLAN_GENERATOR_INSTALLED || die "netplan-generator is still installed after conversion."
+    if [[ $MODE == dhcp ]]; then
+        package_installed isc-dhcp-client ||
+            die "isc-dhcp-client is not installed after DHCP conversion."
+        command -v dhclient >/dev/null 2>&1 ||
+            die "dhclient is unavailable after DHCP conversion."
+    fi
     if [[ -n $NETPLAN_SET_NAME ]]; then
         [[ -f $LINK_FILE ]] || die "Persistent interface pin $LINK_FILE is missing after conversion."
         link_file_matches "$LINK_FILE" || die "Persistent interface pin $LINK_FILE does not contain the expected mapping."
@@ -1509,9 +1645,6 @@ verify_conversion() {
 
     if [[ $MODE == static ]]; then
         local static_ip=${LIVE_ADDRESS%/*}
-
-        grep -Eq '^[[:space:]]*nohook[[:space:]].*resolv\.conf([[:space:],]|$)' "$DHCPCD_CONF" ||
-            die "$DHCPCD_CONF does not contain 'nohook resolv.conf' after static conversion."
 
         grep -Eq '^[[:space:]]*manage_etc_hosts:[[:space:]]*false([[:space:]]|$)' "$CLOUD_HOSTS_DISABLE" ||
             die "$CLOUD_HOSTS_DISABLE does not disable cloud-init /etc/hosts management."
@@ -1538,7 +1671,12 @@ verify_conversion() {
     echo "Network conversion complete."
     echo
     echo "The current network connection was intentionally left untouched."
-    echo "Reboot the system to activate ifupdown networking."
+    command -v ifquery >/dev/null 2>&1 || die "ifquery is unavailable after conversion."
+    command -v ifreload >/dev/null 2>&1 || die "ifreload is unavailable after conversion."
+    ifquery -i "$INTERFACES" "$IFACE" >/dev/null ||
+        die "ifupdown2 could not parse the committed configuration for $IFACE."
+
+    echo "Reboot the system to activate ifupdown2 networking."
     echo
     echo "After reboot, verify networking before running setup-nics.sh or setup-static-ip.sh."
 }
@@ -1550,6 +1688,12 @@ verify_conversion() {
 
 main() {
     preflight
+
+    if $LEGACY_MIGRATION_ONLY; then
+        migrate_legacy_ifupdown
+        return 0
+    fi
+
     collect_netplan_files
     parse_netplan
     check_existing_link_files
@@ -1567,9 +1711,8 @@ main() {
     stage_resolv_conf
     show_staged_files
 
-    install_ifupdown
+    install_ifupdown2
     validate_staged_interfaces
-    configure_dhcpcd
     write_persistent_link
     commit_interfaces
     disable_cloud_hosts_management

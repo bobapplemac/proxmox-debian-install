@@ -212,13 +212,18 @@ Converts the selected interface to a persistent static IPv4 configuration.
 
 It also configures persistent DNS, validates hostname/FQDN resolution, and updates `/etc/hosts` as required.
 
+When converting an active DHCP configuration to static addressing, it can safely stop either the
+`dhcpcd` client used by classic Debian `ifupdown` or the `dhclient` client used by Debian 13's
+`ifupdown2` package without releasing the current lease.
+
 The script does not restart networking in-place.
 
 A reboot is recommended after configuration.
 
 ### `setup-ifupdown.sh`
 
-Converts a supported Netplan/systemd-networkd configuration to traditional Debian ifupdown networking.
+Converts a supported Netplan/systemd-networkd configuration directly to Proxmox-recommended
+`ifupdown2` networking.
 
 This is primarily intended for Debian cloud images.
 
@@ -234,7 +239,12 @@ Supported source configurations are intentionally simple:
 
 Where Netplan already contains a MAC-based `set-name` mapping, that mapping is preserved using a systemd `.link` file.
 
-The conversion does not interrupt the active network session. A reboot is required to activate the new ifupdown configuration.
+For DHCP configurations, the converter also installs `isc-dhcp-client`, which is the DHCP client
+used by Debian 13's `ifupdown2` package. The conversion does not interrupt the active network
+session. A reboot is required to activate the new `ifupdown2` configuration.
+
+If an older revision of the script already converted the system to classic `ifupdown`, rerunning
+the current script upgrades that configuration to `ifupdown2` without reloading networking.
 
 ### `disable-ipv6.sh`
 
@@ -440,7 +450,7 @@ reboot                     # recommended if setup-static-ip.sh was run
 As with PBS:
 
 - `setup-nics.sh` may be omitted when the original Netplan configuration already provided a suitable interface mapping.
-- `setup-static-ip.sh` may be omitted when the original Netplan configuration was already static and the resulting ifupdown configuration is correct.
+- `setup-static-ip.sh` may be omitted when the original Netplan configuration was already static and the resulting `ifupdown2` configuration is correct.
 
 Continue with:
 
@@ -468,7 +478,7 @@ The rest of these scripts assume conventional Debian networking through:
 ```text
 /etc/network/interfaces
     |
-    +-- ifupdown
+    +-- ifupdown2
 ```
 
 `setup-ifupdown.sh` performs this conversion while deliberately leaving the currently active network connection untouched.
@@ -480,12 +490,8 @@ systemd-networkd
         ↓
       reboot
         ↓
-ifupdown
+ifupdown2
 ```
-
-The classic `ifupdown` state created by this conversion is transitional. The PVE, PBS, and PDM
-installers all require `ifupdown2` as their final network backend and safely replace classic
-`ifupdown` when necessary.
 
 ## Network Backend Policy
 
@@ -504,9 +510,9 @@ Each product installer:
 - Does not intentionally reload or restart the live network during the transition
 - Verifies that classic `ifupdown` is absent and `ifupdown2` is active at the end
 
-The cloud-image conversion helper still uses classic `ifupdown` as an intermediate backend because
-the current DHCP and static-address preparation workflow depends on `dhcpcd`. The product installer
-performs the final migration to `ifupdown2` after that preparation is complete.
+The cloud-image conversion helper installs `ifupdown2` directly. When the converted source
+configuration uses DHCP, it also installs `isc-dhcp-client`; `setup-static-ip.sh` can subsequently
+stop that client without releasing the current lease while committing the static configuration.
 
 ## Reboots Are Intentional
 
@@ -518,7 +524,7 @@ In particular:
 
 - Interface-name changes are activated by reboot.
 - Static networking is verified after reboot rather than being forcefully restarted remotely.
-- Netplan-to-ifupdown conversion takes effect on reboot.
+- Netplan-to-ifupdown2 conversion takes effect on reboot.
 - PVE part 1 requires a reboot into the Proxmox kernel before part 2.
 - Bare-metal PBS/PDM installations retain the currently running Debian kernel until the first boot into the newly installed Proxmox kernel.
 
